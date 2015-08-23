@@ -1,0 +1,367 @@
+/*  PROJECT : AMBEE - Ambiance Measurement
+  Copyright (c) 2014 MediaTek Inc.  All right reserved.
+
+  This library is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2.1 of the License..
+
+  This library is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
+   See the GNU Lesser General Public License for more details.
+*/
+
+#include "DHT.h"
+#include <Suli.h>
+#include <Wire.h>
+#include "acc_adxl345_Arduino.h"
+
+#include <LBT.h>
+#include <LBTClient.h>
+#include <LGPS.h>
+
+Acc_Adxl345 acc;
+
+//UV Sensor Connected to A0 of Groove Board
+const int uv_pin = A0;
+
+//Light Sensor Connected to A1 port of Grove Board
+const int pinLight = A1;
+
+// Temperature & Humidity Sensor Connected to D2 Port of Grove Board
+#define DHTPIN 2     
+#define DHTTYPE DHT22   // DHT 22  (AM2302)
+DHT dht(DHTPIN, DHTTYPE);
+
+//GPS
+gpsSentenceInfoStruct gps_info;
+double latitude;
+double longitude;
+char datetime_buff[20];
+float speed_f;  //Speed
+      
+//Dust Sensor
+int dust_sensor_pin = 3;    //D3 of the Groove Board
+unsigned long duration;
+unsigned long starttime;
+unsigned long sampletime_ms = 30000;//sampe 30s ;
+unsigned long lowpulseoccupancy = 0;
+float ratio = 0;
+float dust_concentration = 0;
+
+//Sound Sensor
+const int pinSound = A2;
+
+char buff[256];
+static LBTDeviceInfo info = {0};
+boolean find = 0;
+#define SPP_SVR "ASUS Transformer P" // it should be the prefer server's name,  customize it yourself.
+#define ard_log Serial.printf
+int read_size = 0;
+
+
+static unsigned char getComma(unsigned char num,const char *str)
+{
+  unsigned char i,j = 0;
+  int len=strlen(str);
+  for(i = 0;i < len;i ++)
+  {
+     if(str[i] == ',')
+      j++;
+     if(j == num)
+      return i + 1; 
+  }
+  return 0; 
+}
+
+static double getDoubleNumber(const char *s)
+{
+  char buf[10];
+  unsigned char i;
+  double rev;
+  
+  i=getComma(1, s);
+  i = i - 1;
+  strncpy(buf, s, i);
+  buf[i] = 0;
+  rev=atof(buf);
+  return rev; 
+}
+
+static double getIntNumber(const char *s)
+{
+  char buf[10];
+  unsigned char i;
+  double rev;
+  
+  i=getComma(1, s);
+  i = i - 1;
+  strncpy(buf, s, i);
+  buf[i] = 0;
+  rev=atoi(buf);
+  return rev; 
+}
+
+void parseGPGGA(const char* GPGGAstr)
+{
+  /* Refer to http://www.gpsinformation.org/dale/nmea.htm#GGA
+   * Sample data: $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
+   * Where:
+   *  GGA          Global Positioning System Fix Data
+   *  123519       Fix taken at 12:35:19 UTC
+   *  4807.038,N   Latitude 48 deg 07.038' N
+   *  01131.000,E  Longitude 11 deg 31.000' E
+   *  1            Fix quality: 0 = invalid
+   *                            1 = GPS fix (SPS)
+   *                            2 = DGPS fix
+   *                            3 = PPS fix
+   *                            4 = Real Time Kinematic
+   *                            5 = Float RTK
+   *                            6 = estimated (dead reckoning) (2.3 feature)
+   *                            7 = Manual input mode
+   *                            8 = Simulation mode
+   *  08           Number of satellites being tracked
+   *  0.9          Horizontal dilution of position
+   *  545.4,M      Altitude, Meters, above mean sea level
+   *  46.9,M       Height of geoid (mean sea level) above WGS84
+   *                   ellipsoid
+   *  (empty field) time in seconds since last DGPS update
+   *  (empty field) DGPS station ID number
+   *  *47          the checksum data, always begins with *
+   */
+  int tmp, hour, minute, second, num ;
+  if(GPGGAstr[0] == '$')
+  {
+    tmp = getComma(1, GPGGAstr);
+    hour     = (GPGGAstr[tmp + 0] - '0') * 10 + (GPGGAstr[tmp + 1] - '0');
+    minute   = (GPGGAstr[tmp + 2] - '0') * 10 + (GPGGAstr[tmp + 3] - '0');
+    second    = (GPGGAstr[tmp + 4] - '0') * 10 + (GPGGAstr[tmp + 5] - '0');
+    
+//    sprintf(buff, "UTC timer %2d-%2d-%2d", hour, minute, second);
+    sprintf(datetime_buff, "230815%02d%02d%02d", hour, minute, second);
+    Serial.println(buff);
+    
+    tmp = getComma(2, GPGGAstr);
+    latitude = getDoubleNumber(&GPGGAstr[tmp]);
+    tmp = getComma(4, GPGGAstr);
+    longitude = getDoubleNumber(&GPGGAstr[tmp]);
+    sprintf(buff, "latitude = %3.8f, longitude = %3.8f", latitude, longitude);
+    Serial.println(buff); 
+    
+    tmp = getComma(7, GPGGAstr);
+    num = getIntNumber(&GPGGAstr[tmp]);    
+    sprintf(buff, "satellites number = %d", num);
+    Serial.println(buff); 
+
+    speed_f = 0.00;
+  }
+  else
+  {
+    Serial.println("Not get data"); 
+  }
+}
+
+
+void setup()  
+{
+  Serial.begin(9600);
+  ard_log("LBT start\n");
+ 
+  //GPS Init
+  LGPS.powerOn();
+  Serial.println("LGPS Power on, and waiting ..."); 
+  delay(3000);
+
+   //Temperature & Humidity Init
+   dht.begin();
+   acc.begin();
+
+  //Dust Sensor
+  pinMode(8,INPUT);
+  starttime = millis();//get the current time;
+
+  // Begin BT Client
+  bool success = LBTClient.begin();
+  if( !success )
+  {
+      ard_log("Cannot begin Bluetooth Client successfully\n");
+      delay(0xffffffff);
+  }
+  else
+  {
+      ard_log("Bluetooth Client begin successfully\n");
+      // scan the devices around
+      int num = LBTClient.scan(30);
+      ard_log("scanned device number [%d]", num);
+      for (int i = 0; i < num; i++)
+      {
+        memset(&info, 0, sizeof(info));
+        // to check the prefer master(server)'s name
+        if (!LBTClient.getDeviceInfo(i, &info))
+        {
+            continue;
+        }
+        ard_log("getDeviceInfo [%02x:%02x:%02x:%02x:%02x:%02x][%s]", 
+            info.address.nap[1], info.address.nap[0], info.address.uap, info.address.lap[2], info.address.lap[1], info.address.lap[0],
+            info.name);
+        ard_log("\n");    
+        
+        if (0 >= strcmp(info.name, SPP_SVR))
+        {
+            find = 1;
+            ard_log("found the BT Server\n");
+            break;
+        }
+      }      
+  }
+}
+ 
+void loop()
+{
+      int write_size;
+      char data_buff[512]={0};
+      
+    /*  char tmp[256]={0};
+      byte b_data[256]={0};
+      byte *ptr;
+      int len=0;
+     */
+      int i=0;
+      
+      //UV
+      float uv_light_f; 
+      int uv_sensor_val;
+      float uv_sensor_f;
+      long  sum=0;
+    
+    /* Temperature & Humidity Sensor : Start*/
+      float temp_celcious = 0.0;
+      float temp_farenheight=0.0;
+      float humidity = 0.0;
+
+     /* Light Sensor */
+      int light_val = 0;
+    
+      /* Sound Sensor */
+      int sound_value = 0;     
+    
+    // BT : Check if the connection is ready
+    if(find && !LBTClient.connected())
+    {
+        ard_log("Diconnected, try to connect\n");
+        // do connect
+        ard_log("Trying to connect to [%s]", info.name);
+        
+        bool conn_result = LBTClient.connect(info.address);
+        ard_log("connect result [%d]", conn_result);
+ 
+        if( !conn_result )
+        {
+            ard_log("Cannot connect to SPP Server\n");
+            delay(0xffffffff);
+            //delay(1000);
+        }
+        else
+        {
+            ard_log("Connect to SPP Server successfully\n");
+            
+            //Retreive & Post Data
+            for(i=0;i<90000;i++)
+            {
+                  Serial.println("Posting Data Packet: ");
+                  Serial.println(i);
+                  Serial.println("\n");
+                  
+                  //GPS Data Init
+                  Serial.println("LGPS loop"); 
+                  LGPS.getData(&gps_info);
+                  Serial.println((char*)gps_info.GPGGA); 
+                  parseGPGGA((const char*)gps_info.GPGGA);
+                  delay(1000);
+                  
+                  /* Light Sensor */
+                  light_val = analogRead(pinLight); //Grove Board A1 Port
+                  Serial.println(light_val);
+                  delay(1000);
+            
+                  /* UV Sensor */      
+                  for(int i=0; i<32; i++)
+                  {
+                      uv_sensor_val=analogRead(uv_pin);    //
+                      sum=uv_sensor_val+sum;
+                      delay(1);
+                  }    
+                  sum = sum >> 5;
+                  uv_sensor_f = sum*4980.0/1023.0;
+                  Serial.print("The voltage value:");
+                  Serial.print(uv_sensor_f);
+                  Serial.println("mV");
+                  
+                  delay(20);
+            
+                  Serial.println("Start Read Temp");
+                  if (dht.readHT(&temp_celcious, &humidity))
+                  {
+                    Serial.println("------------------------------");
+                    Serial.print("temperature in Celcius = ");
+                    Serial.println(temp_celcious);
+                    Serial.print("temperature in Farenheight = ");
+                    temp_farenheight = (temp_celcious*1.8)+32;
+                    Serial.println(temp_farenheight);
+                
+                    Serial.println("------------------------------");
+                    Serial.print("humidity = ");
+                    Serial.println(humidity);
+                  }
+                  
+                  Serial.println("End Read Temp");
+                 /* Temperature & HUmidity Sensor : End*/
+                    
+                //Dust Sensor
+                duration = pulseIn(dust_sensor_pin, LOW);
+                lowpulseoccupancy = lowpulseoccupancy+duration;
+            
+                if ((millis()-starttime) > sampletime_ms)//if the sampel time == 30s
+                {
+                    ratio = lowpulseoccupancy/(sampletime_ms*10.0);  // Integer percentage 0=>100
+                    dust_concentration = 1.1*pow(ratio,3)-3.8*pow(ratio,2)+520*ratio+0.62; // using spec sheet curve
+                    Serial.print(lowpulseoccupancy);
+                    Serial.print(",");
+                    Serial.print(ratio);
+                    Serial.print(",");
+                    Serial.println(dust_concentration);
+                    lowpulseoccupancy = 0;
+                    starttime = millis();
+                }
+                
+                sound_value = 0;
+                sound_value = analogRead(pinSound);
+                Serial.println("sound_value");
+                Serial.println(sound_value);
+                Serial.println("\n");
+                delay(200);
+                
+                 //Frame Data Packet
+                 sprintf(data_buff, "WTEM|%f|%f|%f|%d|%d|%f|%f|%f|%s|%f|", temp_celcious, uv_sensor_f, dust_concentration, light_val, sound_value, latitude, longitude, speed_f, datetime_buff, humidity);
+                 ard_log("data_buff");
+                 ard_log(data_buff);
+                 ard_log("\n");
+                 write_size = LBTClient.write(data_buff, strlen(data_buff));
+                 ard_log("client first spec write_size [%d]", write_size);
+                
+                delay(2000);
+            }            
+        }         
+       
+        
+        //ard_log("read size [%d][%s]", read_size, buffer);        
+
+        //write_size = LBTClient.write((uint8_t*)"LinkIt BT Client", 16);
+        //ard_log("write_size [%d]", write_size);        
+        
+        //find = 0;
+    }
+    ard_log("loop client\n");
+    delay(2000);
+}
